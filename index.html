@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ticket Distribution — UI5</title>
+
+<!-- Excel parser -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<!-- SAPUI5 (OpenUI5 CDN) -->
+<script
+  id="sap-ui-bootstrap"
+  src="https://sdk.openui5.org/resources/sap-ui-core.js"
+  data-sap-ui-theme="sap_horizon"
+  data-sap-ui-libs="sap.m,sap.ui.layout,sap.ui.unified,sap.ui.core"
+  data-sap-ui-async="true"
+  data-sap-ui-compat-version="edge">
+</script>
+
+<style>
+  html,body,#content{height:100%;margin:0}
+  .tdStatTile{min-width:120px}
+  .tdScoreBar{display:inline-block;height:6px;background:#0854a0;border-radius:3px;vertical-align:middle}
+  .tdScoreBg{display:inline-block;height:6px;width:60px;background:#e5e5e5;border-radius:3px;vertical-align:middle;overflow:hidden}
+</style>
+</head>
+<body class="sapUiBody">
+<div id="content"></div>
+
+<script>
+sap.ui.require([
+  "sap/ui/core/Core",
+  "sap/ui/core/mvc/Controller",
+  "sap/ui/core/mvc/XMLView",
+  "sap/ui/model/json/JSONModel",
+  "sap/m/Table","sap/m/Column","sap/m/ColumnListItem","sap/m/Text","sap/m/Label",
+  "sap/m/Input","sap/m/Dialog","sap/m/Button","sap/m/Select","sap/ui/core/Item",
+  "sap/m/MessageToast","sap/m/MessageBox","sap/m/HBox","sap/m/VBox"
+], function(Core, Controller, XMLView, JSONModel,
+            Table, Column, ColumnListItem, Text, Label,
+            Input, Dialog, Button, Select, Item,
+            MessageToast, MessageBox, HBox, VBox) {
+"use strict";
+
+// ══════════════════════════════════════════════════════════════
+// Controller
+// ══════════════════════════════════════════════════════════════
+var Main = Controller.extend("td.Main", {
+
+  onInit: function () {
+    this._model = new JSONModel({
+      hasData: false,
+      session: { time: new Date().toLocaleTimeString('es-ES'), loads: 0, total: 0 },
+      stats: { total: 0, assigned: 0, unassigned: 0, lastNew: 0 },
+      team: [],
+      loads: [],
+      allAssignments: [],
+      skillDims: { ticketType: [], systemRole: [], serviceArea: [] },
+      activeDim: "ticketType",
+      tableRows: [],
+      batchItems: [{ key: "all", text: "Todas las cargas" }],
+      batchFilter: "all",
+      rowFilter: "all",
+      loadHistory: "",
+      newMember: { name: "", email: "", cap: 100 },
+      email: {
+        to: "", cc: "",
+        subject: "Distribución de Tickets — {{fecha}}",
+        template: "Equipo,\n\nA continuación la distribución de tickets {{batch_label}}:\n\n{{asignaciones}}\nTotal: {{total}} tickets asignados.{{sin_asignar}}\n\nSaludos",
+        previewBatch: "last",
+        previewItems: [{ key: "last", text: "Última carga" }],
+        preview: "Carga un Excel para ver la vista previa."
+      }
+    });
+    this.getView().setModel(this._model);
+    this._loadPersist();
+    this._buildSkillMatrix();
+    this._renderTeamNote();
+  },
+
+  // ─── formatters ───────────────────────────────────────────
+  fmtPriorityState: function (p) {
+    if (!p) return "None";
+    var lp = String(p).toLowerCase();
+    if (/\b1\b|critical|very high|high/.test(lp)) return "Error";
+    if (/\b4\b|low/.test(lp)) return "Success";
+    return "Warning";
+  },
+
+  // ─── FILE UPLOAD ───────────────────────────────────────────
+  onFileChange: function (oEvent) {
+    var file = oEvent.getParameter("files") && oEvent.getParameter("files")[0];
+    if (!file) return;
+    this._processFile(file);
+    oEvent.getSource().clear();
+  },
+
+  _processFile: function (file) {
+    var that = this;
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      var wb = XLSX.read(new Uint8Array(e.target.result), { type: "array", cellDates: true });
+      var rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { raw: false });
+      if (!rows.length) { MessageBox.warning("El archivo parece vacío."); return; }
+      var d = that._model.getData();
+      var tickets = rows.map(that._normalize).filter(function (t) { return t && t.ticketId; });
+      var seen = {};
+      d.allAssignments.forEach(function (a) { seen[a.ticket.ticketId] = true; });
+      var fresh = tickets.filter(function (t) { return !seen[t.ticketId]; });
+      if (!fresh.length) { MessageBox.information("No hay tickets nuevos en este archivo (todos ya procesados esta sesión)."); return; }
+
+      that._updateDims(tickets);
+      var loadNum = d.loads.length + 1;
+      var batch = that._assignBatch(fresh, loadNum);
+      d.allAssignments = d.allAssignments.concat(batch);
+      d.loads.push({ num: loadNum, file: file.name, ts: new Date(), tsStr: new Date().toLocaleTimeString('es-ES'), newCount: fresh.length, assignments: batch });
+      d.hasData = true;
+      that._model.setData(d);
+      that._refreshAll();
+      MessageToast.show("Carga #" + loadNum + ": " + fresh.length + " tickets nuevos asignados");
+    };
+    reader.readAsArrayBuffer(file);
+  },
+
+  _normalize: function (r) {
+    var g = function () {
+      for (var i = 0; i < arguments.length; i++) {
+        if (r[arguments[i]] !== undefined) return String(r[arguments[i]] || "").trim();
+      }
+      return "";
+    };
+    return {
+      ticketId:     g("Ticket ID", "TicketID", "ticket_id", "ID"),
+      ticketType:   g("Ticket Type", "TicketType", "Type"),
+      priority:     g("Priority", "Prioridad"),
+      status:       g("Status", "Estado"),
+      queueStatus:  g("Queue Status", "QueueStatus"),
+      waitingReason:g("Waiting Reason", "WaitingReason"),
+      subject:      g("Subject", "Asunto"),
+      processor:    g("Processor", "Procesador"),
+      processingQueue: g("Processing Queue", "ProcessingQueue"),
+      systemRole:   g("System Role", "SystemRole"),
+      serviceArea:  g("Service Area", "ServiceArea"),
+      customerName: g("Customer Name", "CustomerName", "Customer"),
+      reportedAt:   g("Reported At", "ReportedAt"),
+      metric:       g("Metric"),
+      metricDueAt:  g("Metric Due At", "MetricDueAt"),
+      cycleDueAt:   g("Cycle Due At", "CycleDueAt")
+    };
+  },
+
+  // ─── SKILL DIMENSIONS ──────────────────────────────────────
+  _updateDims: function (tickets) {
+    var dims = this._model.getProperty("/skillDims");
+    var add = function (dim, val) { if (val && dims[dim].indexOf(val) < 0) dims[dim].push(val); };
+    tickets.forEach(function (t) { add("ticketType", t.ticketType); add("systemRole", t.systemRole); add("serviceArea", t.serviceArea); });
+    dims.ticketType.sort(); dims.systemRole.sort(); dims.serviceArea.sort();
+    this._model.setProperty("/skillDims", dims);
+    this._buildSkillMatrix();
+  },
+
+  // ─── ASSIGNMENT ENGINE ─────────────────────────────────────
+  _getSkill: function (m, dim, val) {
+    return (m.skills && m.skills[dim] && m.skills[dim][val]) || 0;
+  },
+
+  _assignBatch: function (tickets, loadNum) {
+    var d = this._model.getData();
+    var counts = {};
+    d.team.forEach(function (m) {
+      counts[m.id] = d.allAssignments.filter(function (a) { return a.assigneeId === m.id; }).length;
+    });
+    var that = this;
+    return tickets.map(function (ticket) {
+      var r = that._score1(ticket, counts);
+      r.batchNum = loadNum;
+      if (r.assigneeId) counts[r.assigneeId] = (counts[r.assigneeId] || 0) + 1;
+      return r;
+    });
+  },
+
+  _score1: function (ticket, counts) {
+    var d = this._model.getData();
+    var that = this;
+    var avail = d.team.filter(function (m) { return m.active !== false; });
+    if (!avail.length) return { ticket: ticket, assigneeId: null, assigneeName: null, score: 0, alternatives: [], reason: "no_team" };
+
+    var scored = avail.map(function (m) {
+      var ts = that._getSkill(m, "ticketType", ticket.ticketType);
+      var rs = that._getSkill(m, "systemRole", ticket.systemRole);
+      var as = that._getSkill(m, "serviceArea", ticket.serviceArea);
+      var skillScore = ts * 0.30 + rs * 0.35 + as * 0.35;              // 0–5
+      var cap = (m.dailyCap !== undefined ? m.dailyCap : (m.baseCap || 100)) / 100;
+      var maxT = Math.max(1, Math.round(20 * cap));
+      var load = counts[m.id] || 0;
+      var loadFactor = Math.max(0, 1 - load / maxT);                   // 0–1
+      var total = skillScore * 0.65 + loadFactor * 5 * 0.35;
+      return { m: m, skillScore: skillScore, loadFactor: loadFactor, total: total, load: load };
+    });
+    scored.sort(function (a, b) { return b.total - a.total; });
+
+    var alts = scored.slice(1, 4).map(function (s) { return { id: s.m.id, name: s.m.name, score: s.total }; });
+    var hasDimData = d.skillDims.ticketType.length > 0 || d.skillDims.systemRole.length > 0;
+
+    if (hasDimData && scored[0].skillScore < 0.5) {
+      return {
+        ticket: ticket, assigneeId: null, assigneeName: null, score: 0,
+        alternatives: scored.slice(0, 3).map(function (s) { return { id: s.m.id, name: s.m.name, score: s.skillScore }; }),
+        reason: "no_expertise"
+      };
+    }
+    var pick = scored.filter(function (s) { return s.loadFactor > 0; })[0] || scored[0];
+    return {
+      ticket: ticket, assigneeId: pick.m.id, assigneeName: pick.m.name,
+      score: pick.total, alternatives: alts,
+      reason: pick.loadFactor === 0 ? "overloaded" : "ok",
+      overloaded: pick.loadFactor === 0
+    };
+  },
+
+  // ─── REFRESH ───────────────────────────────────────────────
+  _refreshAll: function () {
+    var d = this._model.getData();
+    // session + stats
+    d.session.loads = d.loads.length;
+    d.session.total = d.allAssignments.length;
+    var assigned = d.allAssignments.filter(function (a) { return a.assigneeId; }).length;
+    var last = d.loads[d.loads.length - 1];
+    d.stats = {
+      total: d.allAssignments.length,
+      assigned: assigned,
+      unassigned: d.allAssignments.length - assigned,
+      lastNew: last ? last.newCount : 0
+    };
+    // batch selectors
+    d.batchItems = [{ key: "all", text: "Todas las cargas" }].concat(d.loads.map(function (l) {
+      return { key: String(l.num), text: "Carga #" + l.num + " — " + l.newCount + " tickets (" + l.file + ")" };
+    }));
+    d.email.previewItems = [{ key: "last", text: "Última carga" }]
+      .concat(d.loads.map(function (l) { return { key: String(l.num), text: "Carga #" + l.num + " — " + l.newCount + " tickets" }; }))
+      .concat([{ key: "all", text: "Sesión completa" }]);
+    // load history
+    d.loadHistory = d.loads.map(function (l) {
+      return "Carga #" + l.num + ": " + l.file + " — " + l.newCount + " tickets nuevos — " + l.tsStr;
+    }).join("\n");
+    this._model.setData(d);
+    this._refreshTable();
+    this._renderPreview();
+    this._buildSkillMatrix();
+    this._renderTeamNote();
+    this._persist();
+  },
+
+  _refreshTable: function () {
+    var d = this._model.getData();
+    var list = d.allAssignments;
+    if (d.batchFilter !== "all") {
+      var ld = d.loads.filter(function (l) { return String(l.num) === d.batchFilter; })[0];
+      list = ld ? ld.assignments : [];
+    }
+    if (d.rowFilter === "unassigned") list = list.filter(function (a) { return !a.assigneeId; });
+
+    var all = d.allAssignments;
+    var rows = list.map(function (a) {
+      var alt = (!a.assigneeId && a.alternatives && a.alternatives.length)
+        ? "Sugeridos: " + a.alternatives.map(function (x) { return x.name; }).join(", ") : "";
+      return {
+        idx: all.indexOf(a),
+        ticketId: a.ticket.ticketId,
+        batchNum: a.batchNum,
+        ticketType: a.ticket.ticketType || "—",
+        priority: a.ticket.priority || "—",
+        customerName: a.ticket.customerName || "—",
+        subject: a.ticket.subject || "—",
+        systemRole: a.ticket.systemRole || "—",
+        serviceArea: a.ticket.serviceArea || "—",
+        assigneeName: a.assigneeId ? a.assigneeName : "Sin asignar",
+        isAssigned: !!a.assigneeId,
+        overloaded: !!a.overloaded,
+        scorePct: a.assigneeId ? Math.round((a.score / 5) * 100) : 0,
+        altText: alt
+      };
+    });
+    this._model.setProperty("/tableRows", rows);
+  },
+
+  onBatchFilterChange: function (oEvent) {
+    this._model.setProperty("/batchFilter", oEvent.getParameter("selectedItem").getKey());
+    this._refreshTable();
+  },
+  onFilterAll: function () { this._model.setProperty("/rowFilter", "all"); this._refreshTable(); },
+  onFilterUnassigned: function () { this._model.setProperty("/rowFilter", "unassigned"); this._refreshTable(); },
+  onGoEmail: function () { this._renderPreview(); this.byId("itb").setSelectedKey("email"); },
+
+  // ─── TEAM ──────────────────────────────────────────────────
+  onAddMember: function () {
+    var d = this._model.getData();
+    var nm = d.newMember;
+    if (!nm.name || !nm.name.trim()) { MessageToast.show("Ingresa un nombre"); return; }
+    d.team.push({
+      id: Date.now().toString(),
+      name: nm.name.trim(), email: (nm.email || "").trim(),
+      baseCap: parseInt(nm.cap) || 100, dailyCap: parseInt(nm.cap) || 100,
+      active: true, skills: { ticketType: {}, systemRole: {}, serviceArea: {} }
+    });
+    d.newMember = { name: "", email: "", cap: 100 };
+    this._model.setData(d);
+    this._buildSkillMatrix();
+    this._renderTeamNote();
+    this._persist();
+  },
+
+  onRemoveMember: function (oEvent) {
+    var ctx = oEvent.getSource().getBindingContext();
+    var id = ctx.getProperty("id");
+    var name = ctx.getProperty("name");
+    var that = this;
+    MessageBox.confirm("¿Eliminar a " + name + " del equipo?", {
+      onClose: function (act) {
+        if (act !== MessageBox.Action.OK) return;
+        var d = that._model.getData();
+        d.team = d.team.filter(function (m) { return m.id !== id; });
+        that._model.setData(d);
+        that._buildSkillMatrix();
+        that._renderTeamNote();
+        that._persist();
+      }
+    });
+  },
+
+  onToggleActive: function (oEvent) {
+    var ctx = oEvent.getSource().getBindingContext();
+    ctx.getModel().setProperty(ctx.getPath() + "/active", oEvent.getParameter("state"));
+    this._renderTeamNote();
+    this._persist();
+  },
+
+  onCapChange: function (oEvent) {
+    var ctx = oEvent.getSource().getBindingContext();
+    ctx.getModel().setProperty(ctx.getPath() + "/dailyCap", Math.round(oEvent.getParameter("value")));
+    this._persist();
+  },
+
+  onResetCapacities: function () {
+    var d = this._model.getData();
+    d.team.forEach(function (m) { m.dailyCap = m.baseCap; });
+    this._model.setData(d);
+    this._persist();
+  },
+
+  _teamCount: function (id) {
+    return this._model.getProperty("/allAssignments").filter(function (a) { return a.assigneeId === id; }).length;
+  },
+
+  _renderTeamNote: function () {
+    // enrich team with today's assigned count for the list display
+    var d = this._model.getData();
+    var that = this;
+    d.team.forEach(function (m) { m.assignedToday = that._teamCount(m.id); });
+    this._model.setProperty("/team", d.team);
+  },
+
+  // ─── SKILLS ────────────────────────────────────────────────
+  onDimSelect: function (oEvent) {
+    this._model.setProperty("/activeDim", oEvent.getParameter("selectedItem").getKey());
+    this._buildSkillMatrix();
+  },
+
+  _buildSkillMatrix: function () {
+    var box = this.byId("skillBox");
+    if (!box) return;
+    box.destroyItems();
+    var d = this._model.getData();
+    var dim = d.activeDim;
+    var cats = d.skillDims[dim] || [];
+    if (!d.team.length) { box.addItem(new Text({ text: "Añade colegas en la pestaña Equipo." })); return; }
+    if (!cats.length) { box.addItem(new Text({ text: "Carga un Excel para que aparezcan las categorías." })); return; }
+
+    var that = this;
+    var tbl = new Table({ fixedLayout: false, inset: false });
+    tbl.addColumn(new Column({ width: "160px", header: new Label({ text: "Colega", design: "Bold" }) }));
+    cats.forEach(function (c) {
+      var short = c.length > 16 ? c.slice(0, 14) + "…" : c;
+      tbl.addColumn(new Column({ hAlign: "Center", header: new Label({ text: short, tooltip: c }) }));
+    });
+
+    d.team.forEach(function (m) {
+      var cells = [ new Text({ text: m.name }) ];
+      cats.forEach(function (c) {
+        var val = (m.skills && m.skills[dim] && m.skills[dim][c]) || 0;
+        cells.push(new Input({
+          value: String(val), type: "Number", textAlign: "Center", width: "58px",
+          tooltip: m.name + " — " + c,
+          change: (function (memberId, category) {
+            return function (ev) {
+              var v = Math.min(5, Math.max(0, parseInt(ev.getParameter("value")) || 0));
+              ev.getSource().setValue(String(v));
+              that._setSkill(memberId, dim, category, v);
+            };
+          })(m.id, c)
+        }));
+      });
+      tbl.addItem(new ColumnListItem({ cells: cells }));
+    });
+    box.addItem(tbl);
+  },
+
+  _setSkill: function (id, dim, cat, val) {
+    var d = this._model.getData();
+    var m = d.team.filter(function (x) { return x.id === id; })[0];
+    if (!m) return;
+    if (!m.skills) m.skills = { ticketType: {}, systemRole: {}, serviceArea: {} };
+    if (!m.skills[dim]) m.skills[dim] = {};
+    m.skills[dim][cat] = val;
+    this._persist();
+  },
+
+  // ─── REASSIGN DIALOG ───────────────────────────────────────
+  onReassign: function (oEvent) {
+    var idx = oEvent.getSource().getBindingContext().getProperty("idx");
+    var d = this._model.getData();
+    var a = d.allAssignments[idx];
+    var ticket = a.ticket;
+    var that = this;
+
+    var sel = new Select({ width: "100%" });
+    sel.addItem(new Item({ key: "", text: "— Sin asignar —" }));
+    d.team.forEach(function (m) {
+      var cnt = that._teamCount(m.id);
+      var avg = ((that._getSkill(m, "ticketType", ticket.ticketType)
+        + that._getSkill(m, "systemRole", ticket.systemRole)
+        + that._getSkill(m, "serviceArea", ticket.serviceArea)) / 3).toFixed(1);
+      var txt = m.name + " — Skill: " + avg + "/5 | Carga: " + cnt + (m.active === false ? " (ausente)" : "");
+      sel.addItem(new Item({ key: m.id, text: txt, enabled: m.active !== false }));
+    });
+    sel.setSelectedKey(a.assigneeId || "");
+
+    var dlg = new Dialog({
+      title: "Reasignar: " + ticket.ticketId,
+      contentWidth: "460px",
+      content: [
+        new VBox({ items: [
+          new Text({ text: (ticket.ticketType || "—") + " | " + (ticket.systemRole || "—") + " | " + (ticket.serviceArea || "—") })
+            .addStyleClass("sapUiTinyMarginBottom"),
+          new Label({ text: "Asignar a", labelFor: sel }),
+          sel
+        ]}).addStyleClass("sapUiContentPadding")
+      ],
+      beginButton: new Button({
+        text: "Confirmar", type: "Emphasized",
+        press: function () {
+          var v = sel.getSelectedKey();
+          var mb = d.team.filter(function (m) { return m.id === v; })[0];
+          d.allAssignments[idx].assigneeId = v || null;
+          d.allAssignments[idx].assigneeName = mb ? mb.name : null;
+          d.allAssignments[idx].manualOverride = true;
+          if (v) d.allAssignments[idx].overloaded = false;
+          that._model.setData(d);
+          that._refreshAll();
+          dlg.close();
+        }
+      }),
+      endButton: new Button({ text: "Cancelar", press: function () { dlg.close(); } }),
+      afterClose: function () { dlg.destroy(); }
+    });
+    this.getView().addDependent(dlg);
+    dlg.open();
+  },
+
+  // ─── EMAIL ─────────────────────────────────────────────────
+  onEmailFieldChange: function () { this._persist(); this._renderPreview(); },
+  onPreviewBatchChange: function (oEvent) {
+    this._model.setProperty("/email/previewBatch", oEvent.getParameter("selectedItem").getKey());
+    this._renderPreview();
+  },
+
+  _buildEmailBody: function (list) {
+    var today = new Date().toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    var grouped = {}, unassigned = [];
+    list.forEach(function (a) {
+      if (a.assigneeId) { (grouped[a.assigneeName] = grouped[a.assigneeName] || []).push(a); }
+      else unassigned.push(a);
+    });
+    var lines = "";
+    Object.keys(grouped).sort().forEach(function (name) {
+      var arr = grouped[name];
+      lines += name + " (" + arr.length + " ticket" + (arr.length > 1 ? "s" : "") + "):\n";
+      arr.forEach(function (a) {
+        var pri = a.ticket.priority ? "[" + a.ticket.priority + "] " : "";
+        lines += "  • " + a.ticket.ticketId + " " + pri + "| " + (a.ticket.ticketType || "—") + " | " + (a.ticket.customerName || "—") + "\n";
+        if (a.ticket.subject) lines += "    " + a.ticket.subject.slice(0, 90) + (a.ticket.subject.length > 90 ? "…" : "") + "\n";
+      });
+      lines += "\n";
+    });
+    var sinBlock = "";
+    if (unassigned.length) {
+      sinBlock = "\n\n⚠ SIN ASIGNAR (" + unassigned.length + " — revisión manual):\n";
+      unassigned.forEach(function (a) {
+        var sugs = (a.alternatives && a.alternatives.length)
+          ? "Sugeridos: " + a.alternatives.map(function (x) { return x.name; }).join(", ")
+          : "(configura skills para sugerencias)";
+        sinBlock += "  • " + a.ticket.ticketId + " | " + (a.ticket.ticketType || "—") + " | " + (a.ticket.systemRole || "—") + "\n    " + sugs + "\n";
+      });
+    }
+    var assignedCount = 0;
+    Object.keys(grouped).forEach(function (k) { assignedCount += grouped[k].length; });
+    return { today: today, lines: lines.replace(/\s+$/, ""), sinBlock: sinBlock, assignedCount: assignedCount };
+  },
+
+  _previewList: function () {
+    var d = this._model.getData();
+    var val = d.email.previewBatch;
+    if (val === "all") return d.allAssignments;
+    if (val === "last") return d.loads.length ? d.loads[d.loads.length - 1].assignments : [];
+    var ld = d.loads.filter(function (l) { return String(l.num) === val; })[0];
+    return ld ? ld.assignments : [];
+  },
+
+  _renderPreview: function () {
+    var d = this._model.getData();
+    if (!d.allAssignments.length) { this._model.setProperty("/email/preview", "Carga un Excel para ver la vista previa."); return; }
+    var list = this._previewList();
+    if (!list.length) { this._model.setProperty("/email/preview", "Sin tickets en esta selección."); return; }
+    var b = this._buildEmailBody(list);
+    var bv = d.email.previewBatch, batchLabel;
+    if (bv === "all") batchLabel = "de la sesión completa — " + new Date().toLocaleDateString('es-ES');
+    else if (bv === "last" && d.loads.length) {
+      var l = d.loads[d.loads.length - 1];
+      batchLabel = "(Carga #" + l.num + " — " + l.newCount + " tickets — " + l.tsStr + ")";
+    } else {
+      var lf = d.loads.filter(function (x) { return String(x.num) === bv; })[0];
+      batchLabel = lf ? "(Carga #" + lf.num + " — " + lf.newCount + " tickets — " + lf.tsStr + ")" : b.today;
+    }
+    var body = d.email.template
+      .replace(/\{\{fecha\}\}/g, b.today)
+      .replace(/\{\{batch_label\}\}/g, batchLabel)
+      .replace(/\{\{asignaciones\}\}/g, b.lines)
+      .replace(/\{\{total\}\}/g, String(b.assignedCount))
+      .replace(/\{\{sin_asignar\}\}/g, b.sinBlock);
+    this._model.setProperty("/email/preview", body);
+  },
+
+  onCopyBody: function () {
+    var txt = this._model.getProperty("/email/preview");
+    navigator.clipboard.writeText(txt).then(function () { MessageToast.show("Cuerpo copiado al portapapeles"); });
+  },
+
+  onOpenOutlook: function () {
+    var d = this._model.getData();
+    var today = new Date().toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    var to = encodeURIComponent(d.email.to || "");
+    var cc = encodeURIComponent(d.email.cc || "");
+    var sub = encodeURIComponent((d.email.subject || "").replace(/\{\{fecha\}\}/g, today));
+    var raw = d.email.preview;
+    navigator.clipboard.writeText(raw);
+    var link = "mailto:" + to + "?cc=" + cc + "&subject=" + sub + "&body=" + encodeURIComponent(raw);
+    if (link.length > 2000) {
+      window.location.href = "mailto:" + to + "?cc=" + cc + "&subject=" + sub;
+      setTimeout(function () { MessageBox.information("El email es largo — el cuerpo fue copiado al portapapeles. Pégalo en Outlook con Ctrl+V."); }, 400);
+    } else {
+      window.location.href = link;
+    }
+  },
+
+  // ─── PERSIST ───────────────────────────────────────────────
+  _persist: function () {
+    var d = this._model.getData();
+    localStorage.setItem("td_ui5_team", JSON.stringify(d.team));
+    localStorage.setItem("td_ui5_email", JSON.stringify({
+      to: d.email.to, cc: d.email.cc, subject: d.email.subject, template: d.email.template
+    }));
+  },
+  _loadPersist: function () {
+    try {
+      var t = localStorage.getItem("td_ui5_team");
+      if (t) { this._model.setProperty("/team", JSON.parse(t)); this._renderTeamNote(); }
+      var e = localStorage.getItem("td_ui5_email");
+      if (e) {
+        var c = JSON.parse(e), em = this._model.getProperty("/email");
+        if (c.to) em.to = c.to; if (c.cc) em.cc = c.cc;
+        if (c.subject) em.subject = c.subject; if (c.template) em.template = c.template;
+        this._model.setProperty("/email", em);
+      }
+    } catch (x) {}
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// View (XML as inline definition — no network fetch needed)
+// ══════════════════════════════════════════════════════════════
+var sXml =
+'<mvc:View xmlns:mvc="sap.ui.core.mvc" xmlns="sap.m" xmlns:u="sap.ui.unified" xmlns:l="sap.ui.layout" xmlns:core="sap.ui.core" height="100%">' +
+  '<Page showHeader="true" title="🎫 Ticket Distribution" class="sapUiContentPadding">' +
+    '<headerContent>' +
+      '<Text text="Sesión: {/session/time}  |  Cargas: {/session/loads}  |  Tickets: {/session/total}"/>' +
+    '</headerContent>' +
+    '<content>' +
+    '<IconTabBar id="itb" expandable="false" selectedKey="dist" class="sapUiResponsiveContentPadding">' +
+
+      // ─── DISTRIBUCIÓN ───
+      '<items>' +
+      '<IconTabFilter key="dist" text="Distribución" icon="sap-icon://bar-chart">' +
+        '<Panel headerText="Cargar Excel de tickets" class="sapUiResponsiveMargin" width="auto">' +
+          '<HBox alignItems="Center" class="sapUiSmallMargin">' +
+            '<u:FileUploader fileType="xlsx,xls" placeholder="Selecciona el Excel filtrado…" ' +
+              'buttonText="Examinar" width="420px" change=".onFileChange"/>' +
+          '</HBox>' +
+        '</Panel>' +
+
+        '<VBox visible="{/hasData}">' +
+          '<HBox wrap="Wrap" class="sapUiSmallMarginBegin sapUiSmallMarginTop">' +
+            '<Panel class="tdStatTile sapUiTinyMargin"><VBox><ObjectNumber number="{/stats/total}" emphasized="true"/><Text text="Total sesión"/></VBox></Panel>' +
+            '<Panel class="tdStatTile sapUiTinyMargin"><VBox><ObjectNumber number="{/stats/assigned}" state="Success"/><Text text="Asignados"/></VBox></Panel>' +
+            '<Panel class="tdStatTile sapUiTinyMargin"><VBox><ObjectNumber number="{/stats/unassigned}" state="Error"/><Text text="Sin asignar"/></VBox></Panel>' +
+            '<Panel class="tdStatTile sapUiTinyMargin"><VBox><ObjectNumber number="{/stats/lastNew}"/><Text text="Nuevos (última carga)"/></VBox></Panel>' +
+          '</HBox>' +
+
+          '<Panel headerText="Asignaciones" class="sapUiResponsiveMargin" width="auto">' +
+            '<Toolbar>' +
+              '<Select selectedKey="{/batchFilter}" change=".onBatchFilterChange" items="{/batchItems}">' +
+                '<core:Item key="{key}" text="{text}"/>' +
+              '</Select>' +
+              '<ToolbarSpacer/>' +
+              '<Button text="Todas" press=".onFilterAll"/>' +
+              '<Button text="⚠ Sin asignar" press=".onFilterUnassigned"/>' +
+              '<Button text="📧 Generar Email" type="Emphasized" press=".onGoEmail"/>' +
+            '</Toolbar>' +
+            '<Table items="{/tableRows}" fixedLayout="false" alternateRowColors="true">' +
+              '<columns>' +
+                '<Column><Text text="Ticket ID"/></Column>' +
+                '<Column><Text text="Tipo"/></Column>' +
+                '<Column><Text text="Prioridad"/></Column>' +
+                '<Column><Text text="Cliente"/></Column>' +
+                '<Column><Text text="Asunto"/></Column>' +
+                '<Column><Text text="System Role"/></Column>' +
+                '<Column><Text text="Service Area"/></Column>' +
+                '<Column><Text text="Asignado a"/></Column>' +
+                '<Column hAlign="Center"><Text text="Confianza"/></Column>' +
+                '<Column hAlign="Center"><Text text=""/></Column>' +
+              '</columns>' +
+              '<items>' +
+                '<ColumnListItem>' +
+                  '<cells>' +
+                    '<VBox><Text text="{ticketId}"/><Text text="Carga #{batchNum}" class="sapUiTinyText"/></VBox>' +
+                    '<Text text="{ticketType}" maxLines="1"/>' +
+                    '<ObjectStatus text="{priority}" state="{path:\'priority\', formatter:\'.fmtPriorityState\'}"/>' +
+                    '<Text text="{customerName}" maxLines="1"/>' +
+                    '<Text text="{subject}" maxLines="2"/>' +
+                    '<Text text="{systemRole}"/>' +
+                    '<Text text="{serviceArea}"/>' +
+                    '<VBox>' +
+                      '<ObjectStatus text="{assigneeName}" state="{= ${isAssigned} ? \'Success\' : \'Error\'}" ' +
+                        'icon="{= ${overloaded} ? \'sap-icon://alert\' : \'\'}"/>' +
+                      '<Text text="{altText}" visible="{= ${altText} !== \'\'}" class="sapUiTinyText"/>' +
+                    '</VBox>' +
+                    '<ObjectNumber number="{scorePct}" unit="%" visible="{isAssigned}"/>' +
+                    '<Button icon="sap-icon://edit" tooltip="Reasignar" press=".onReassign"/>' +
+                  '</cells>' +
+                '</ColumnListItem>' +
+              '</items>' +
+            '</Table>' +
+          '</Panel>' +
+
+          '<Panel headerText="Historial de cargas" class="sapUiResponsiveMargin" width="auto" expandable="true" expanded="false">' +
+            '<Text text="{/loadHistory}" class="sapUiSmallMargin"/>' +
+          '</Panel>' +
+        '</VBox>' +
+
+        '<MessageStrip visible="{= !${/hasData} }" text="Carga un Excel filtrado para comenzar la distribución." showIcon="true" class="sapUiMediumMargin"/>' +
+      '</IconTabFilter>' +
+
+      // ─── EQUIPO ───
+      '<IconTabFilter key="equipo" text="Equipo" icon="sap-icon://group">' +
+        '<Panel headerText="Añadir colega" class="sapUiResponsiveMargin" width="auto">' +
+          '<HBox wrap="Wrap" alignItems="End" class="sapUiSmallMargin">' +
+            '<VBox class="sapUiTinyMarginEnd"><Label text="Nombre"/><Input value="{/newMember/name}" placeholder="Ana García" width="180px"/></VBox>' +
+            '<VBox class="sapUiTinyMarginEnd"><Label text="Email"/><Input value="{/newMember/email}" placeholder="ana@empresa.com" width="220px"/></VBox>' +
+            '<VBox class="sapUiTinyMarginEnd"><Label text="Capacidad base %"/><Input value="{/newMember/cap}" type="Number" width="90px"/></VBox>' +
+            '<Button text="+ Añadir" type="Emphasized" press=".onAddMember"/>' +
+          '</HBox>' +
+        '</Panel>' +
+        '<Panel class="sapUiResponsiveMargin" width="auto">' +
+          '<headerToolbar><Toolbar><Title text="Equipo — configuración del día"/><ToolbarSpacer/>' +
+            '<Button text="↺ Reset capacidades" press=".onResetCapacities"/></Toolbar></headerToolbar>' +
+          '<List items="{/team}" noDataText="Añade colegas para comenzar">' +
+            '<CustomListItem>' +
+              '<HBox alignItems="Center" justifyContent="SpaceBetween" class="sapUiSmallMargin" wrap="Wrap">' +
+                '<VBox width="260px"><Text text="{name}"/>' +
+                  '<Text text="{= ${email} || \'Sin email\'} · {assignedToday} tickets hoy" class="sapUiTinyText"/></VBox>' +
+                '<HBox alignItems="Center" class="sapUiSmallMarginBegin">' +
+                  '<VBox alignItems="Center" class="sapUiMediumMarginEnd"><Label text="Trabaja hoy" class="sapUiTinyText"/>' +
+                    '<Switch state="{active}" change=".onToggleActive"/></VBox>' +
+                  '<VBox alignItems="Center" width="200px"><Label text="Capacidad {dailyCap}%" class="sapUiTinyText"/>' +
+                    '<Slider value="{dailyCap}" min="0" max="100" step="5" width="170px" change=".onCapChange"/></VBox>' +
+                  '<Button icon="sap-icon://delete" type="Reject" tooltip="Eliminar" press=".onRemoveMember" class="sapUiSmallMarginBegin"/>' +
+                '</HBox>' +
+              '</HBox>' +
+            '</CustomListItem>' +
+          '</List>' +
+        '</Panel>' +
+      '</IconTabFilter>' +
+
+      // ─── SKILLS ───
+      '<IconTabFilter key="skills" text="Skills" icon="sap-icon://competitor">' +
+        '<Panel headerText="Matriz de habilidades (0–5)" class="sapUiResponsiveMargin" width="auto">' +
+          '<VBox class="sapUiSmallMargin">' +
+            '<Text text="Valora 0–5 el conocimiento de cada colega. Las categorías se extraen de los tickets cargados." class="sapUiSmallMarginBottom"/>' +
+            '<SegmentedButton selectedKey="{/activeDim}" selectionChange=".onDimSelect" class="sapUiSmallMarginBottom">' +
+              '<items>' +
+                '<SegmentedButtonItem key="ticketType" text="Tipo de Ticket"/>' +
+                '<SegmentedButtonItem key="systemRole" text="System Role"/>' +
+                '<SegmentedButtonItem key="serviceArea" text="Service Area"/>' +
+              '</items>' +
+            '</SegmentedButton>' +
+            '<ScrollContainer horizontal="true" width="100%"><VBox id="skillBox"/></ScrollContainer>' +
+          '</VBox>' +
+        '</Panel>' +
+      '</IconTabFilter>' +
+
+      // ─── EMAIL ───
+      '<IconTabFilter key="email" text="Email" icon="sap-icon://email">' +
+        '<Panel headerText="Configuración del correo" class="sapUiResponsiveMargin" width="auto">' +
+          '<VBox class="sapUiSmallMargin">' +
+            '<HBox wrap="Wrap">' +
+              '<VBox width="48%" class="sapUiTinyMarginEnd"><Label text="Para (To)"/><Input value="{/email/to}" placeholder="equipo@empresa.com" change=".onEmailFieldChange"/></VBox>' +
+              '<VBox width="48%"><Label text="CC"/><Input value="{/email/cc}" placeholder="manager@empresa.com" change=".onEmailFieldChange"/></VBox>' +
+            '</HBox>' +
+            '<Label text="Asunto" class="sapUiTinyMarginTop"/>' +
+            '<Input value="{/email/subject}" liveChange=".onEmailFieldChange"/>' +
+            '<Label text="Cuerpo — variables (entre dobles llaves): fecha · batch_label · asignaciones · total · sin_asignar" class="sapUiTinyMarginTop"/>' +
+            '<TextArea value="{/email/template}" rows="9" width="100%" growing="false" liveChange=".onEmailFieldChange"/>' +
+          '</VBox>' +
+        '</Panel>' +
+        '<Panel class="sapUiResponsiveMargin" width="auto">' +
+          '<headerToolbar><Toolbar>' +
+            '<Title text="Vista previa"/>' +
+            '<Select selectedKey="{/email/previewBatch}" change=".onPreviewBatchChange" items="{/email/previewItems}" class="sapUiSmallMarginBegin">' +
+              '<core:Item key="{key}" text="{text}"/>' +
+            '</Select>' +
+            '<ToolbarSpacer/>' +
+            '<Button text="📋 Copiar cuerpo" press=".onCopyBody"/>' +
+            '<Button text="📧 Abrir Outlook" type="Emphasized" press=".onOpenOutlook"/>' +
+          '</Toolbar></headerToolbar>' +
+          '<TextArea value="{/email/preview}" rows="18" width="100%" editable="false" growing="false" class="sapUiSmallMargin"/>' +
+        '</Panel>' +
+      '</IconTabFilter>' +
+
+      '</items>' +
+    '</IconTabBar>' +
+    '</content>' +
+  '</Page>' +
+'</mvc:View>';
+
+Core.ready(function () {
+  XMLView.create({
+    definition: sXml,
+    controller: new Main()
+  }).then(function (oView) {
+    oView.placeAt("content");
+  });
+});
+
+});
+</script>
+</body>
+</html>

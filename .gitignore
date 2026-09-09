@@ -1,0 +1,28 @@
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Node (para la futura reestructuración a microservicios)
+node_modules/
+dist/
+build/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Env / secrets
+.env
+.env.local
+*.local
+
+# Archivos de datos locales (Excel de tickets)
+*.xlsx
+*.xls
