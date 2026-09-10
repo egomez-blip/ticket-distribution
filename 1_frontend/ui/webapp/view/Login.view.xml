@@ -1,0 +1,26 @@
+<mvc:View
+	controllerName="com.support.ticketdist.controller.Login"
+	xmlns="sap.m"
+	xmlns:mvc="sap.ui.core.mvc"
+	xmlns:f="sap.f"
+	displayBlock="true">
+	<Page showHeader="false" class="sapUiContentPadding">
+		<FlexBox height="100%" alignItems="Center" justifyContent="Center" direction="Column">
+			<Panel width="360px" class="sapUiResponsiveMargin">
+				<VBox class="sapUiMediumMargin" alignItems="Center">
+					<core:Icon xmlns:core="sap.ui.core" src="sap-icon://sales-order" size="2.5rem" color="#0854a0"/>
+					<Title text="{i18n>appTitle}" level="H2" class="sapUiSmallMarginTop"/>
+					<Text text="Inicia sesión para continuar" class="sapUiTinyMarginTop sapUiMediumMarginBottom"/>
+					<Label text="{i18n>login_email}" labelFor="emailInput" width="100%"/>
+					<Input id="emailInput" type="Email" width="100%" placeholder="admin@empresa.com"
+						value="admin@empresa.com" class="sapUiSmallMarginBottom"/>
+					<Label text="{i18n>login_password}" labelFor="passwordInput" width="100%"/>
+					<Input id="passwordInput" type="Password" width="100%" submit=".onLogin"
+						class="sapUiSmallMarginBottom"/>
+					<Button text="{i18n>login_button}" type="Emphasized" width="100%" press=".onLogin"
+						class="sapUiSmallMarginTop"/>
+				</VBox>
+			</Panel>
+		</FlexBox>
+	</Page>
+</mvc:View>

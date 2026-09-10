@@ -3,35 +3,82 @@
 Aplicación web para distribuir tickets de soporte entre un equipo, a partir de un
 Excel ya filtrado exportado del sistema de tickets (sin acceso directo a su API).
 
-La UI está construida con **SAPUI5** (OpenUI5 desde CDN, tema Horizon) en un único
-`index.html` — no requiere instalación ni build; se abre directamente en el navegador.
+El estado es **compartido por todo el equipo** (base de datos central) y se
+**sincroniza en vivo**: si alguien reasigna un ticket, actualiza skills o carga un
+nuevo Excel, el cambio se refleja al instante para los demás vía WebSocket.
 
-## Funcionalidades
+## Arquitectura
 
-- **Carga de Excel** filtrado; en cargas sucesivas de la misma sesión detecta solo
-  los tickets nuevos (por `Ticket ID`) y genera **asignaciones parciales**.
-- **Distribución automática** según un *skill matrix* (0–5 por colega) combinado con
-  la carga del día de cada persona:
-  - Score = habilidad (65%) + capacidad/carga disponible (35%).
-  - Si nadie tiene el expertise suficiente, el ticket queda **sin asignar** y se
-    proponen los candidatos más adecuados.
-- **Gestión del equipo:** añadir/quitar colegas, marcar quién **no trabaja** ese día,
-  y ajustar el **porcentaje de capacidad** individual del día.
-- **Skill matrix** en 3 dimensiones extraídas de los tickets: Tipo de Ticket,
-  System Role y Service Area.
-- **Reasignación manual** de cualquier ticket.
-- **Generación de correo** de asignación con plantilla y variables, seleccionando por
-  carga (parcial) o por la sesión completa; abre Outlook vía `mailto:` o copia el cuerpo.
-- Persistencia del equipo y la configuración de correo en `localStorage`.
+Monolito modular + base de datos, orquestado con **Podman** (o Docker):
 
-## Uso
+```
+┌─────────────┐  WebSocket /ws (push en vivo)  ┌──────────────────┐
+│  UI5 (web)  │◄──────────────────────────────►│  FastAPI backend │──► PostgreSQL
+│  :8080      │  REST (login, excel, CRUD)     │  :8000           │
+└─────────────┘───────────────────────────────►└──────────────────┘
+```
 
-1. Abre `index.html` en el navegador (requiere conexión a internet la primera vez para
-   cargar SAPUI5 y la librería de lectura de Excel desde CDN).
-2. En **Equipo**, añade a tus colegas y ajusta capacidad / disponibilidad del día.
-3. En **Skills**, valora 0–5 el conocimiento de cada colega por categoría.
-4. En **Distribución**, carga el Excel; revisa y reasigna si hace falta.
-5. En **Email**, genera y abre el correo de asignación.
+- **`1_backend/backend`** — un solo servicio FastAPI (auth JWT + argon2, SQLAlchemy
+  async, PostgreSQL, WebSocket). Módulos internos: `api/` (routers), `services/`
+  (lógica), `db/` (ORM).
+- **`1_frontend/ui`** — app SAPUI5 en TypeScript (UI5 Tooling + `ui5-tooling-transpile`),
+  servida por nginx.
+- **`0_prototype/index.html`** — prototipo original monolítico (referencia de la lógica).
+
+## Requisitos
+
+- Podman (o Docker) con Compose. `podman compose version` debe funcionar.
+- Para desarrollo del frontend sin contenedor: Node 20+.
+- Para el script de datos de prueba: Python 3.12+ con `openpyxl` (`py -m pip install openpyxl`).
+
+## Puesta en marcha (Podman)
+
+```bash
+cp .env.example .env          # edita secretos: JWT_SECRET_KEY, ADMIN_PASSWORD, POSTGRES_PASSWORD
+podman compose up --build     # levanta postgres + backend + ui
+```
+
+- Frontend: http://localhost:8080
+- API + Swagger: http://localhost:8000/docs
+- Login inicial: `ADMIN_EMAIL` / `ADMIN_PASSWORD` del `.env` (por defecto
+  `admin@empresa.com` / `change-me-admin`).
+
+> El backend crea las tablas y siembra el usuario admin automáticamente al arrancar.
+
+### Desarrollo del frontend por separado (hot reload)
+
+```bash
+cd 1_frontend/ui
+npm install
+npm start          # http://localhost:8080 con recarga en vivo
+```
+
+El backend puede correr en contenedor o local (`cd 1_backend/backend && py -m uvicorn main:app --reload`).
+La URL del backend se define en un único lugar: `1_frontend/ui/webapp/util/Config.ts`.
+
+## Flujo de uso
+
+1. **Equipo** → añade colegas, marca quién trabaja hoy y ajusta su capacidad (%).
+2. **Skills** → valora 0–5 el conocimiento de cada colega por categoría (las categorías
+   aparecen tras cargar el primer Excel).
+3. **Distribución** → carga el Excel; el sistema asigna los tickets nuevos. Cargas
+   posteriores en la misma sesión solo procesan tickets nuevos (asignación parcial).
+   Reasigna manualmente con el botón ✎.
+4. **Email** → genera el cuerpo del correo (por carga o sesión completa) y ábrelo en
+   Outlook.
+
+### Motor de asignación
+
+`score = habilidad·0.65 + carga_disponible·0.35`, donde la habilidad pondera
+Tipo de Ticket (0.30), System Role (0.35) y Service Area (0.35). Si nadie tiene
+expertise suficiente, el ticket queda sin asignar con los 3 candidatos más adecuados.
+
+## Datos de prueba
+
+```bash
+py scripts/make_sample_xlsx.py sample1.xlsx --rows 8 --start 1178650000
+py scripts/make_sample_xlsx.py sample2.xlsx --rows 5 --start 1178650100  # "segunda carga"
+```
 
 ## Columnas esperadas del Excel
 
@@ -39,7 +86,9 @@ La UI está construida con **SAPUI5** (OpenUI5 desde CDN, tema Horizon) en un ú
 `Subject`, `Processor`, `Processing Queue`, `System Role`, `Service Area`,
 `Customer Name`, `Reported At`, `Metric`, `Metric Due At`, `Cycle Due At`.
 
-## Roadmap
+## Producción (futuro)
 
-- Reestructuración a arquitectura de **microservicios** (backend FastAPI + API gateway
-  + frontend UI5 con build + `docker-compose`).
+Correr el mismo `podman compose` en un host central y exponerlo con **Cloudflare
+Tunnel** (descomenta el servicio `cloudflared` en `docker-compose.yml` y define
+`CLOUDFLARE_TUNNEL_TOKEN`). Migrar la DB a un Postgres gestionado solo requiere
+cambiar `DATABASE_URL`.

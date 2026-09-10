@@ -6,10 +6,11 @@ Desktop.ini
 .vscode/
 .idea/
 
-# Node (para la futura reestructuración a microservicios)
+# Node / UI5
 node_modules/
 dist/
 build/
+coverage/
 *.log
 
 # Python

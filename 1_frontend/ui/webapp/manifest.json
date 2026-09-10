@@ -1,0 +1,61 @@
+{
+  "_version": "1.60.0",
+  "sap.app": {
+    "id": "com.support.ticketdist",
+    "type": "application",
+    "i18n": { "bundleUrl": "i18n/i18n.properties", "supportedLocales": [""], "fallbackLocale": "" },
+    "title": "{{appTitle}}",
+    "description": "{{appDescription}}",
+    "applicationVersion": { "version": "1.0.0" }
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "deviceTypes": { "desktop": true, "tablet": true, "phone": true }
+  },
+  "sap.ui5": {
+    "rootView": {
+      "viewName": "com.support.ticketdist.view.App",
+      "type": "XML",
+      "id": "app",
+      "async": true
+    },
+    "dependencies": {
+      "minUI5Version": "1.120.0",
+      "libs": {
+        "sap.ui.core": {},
+        "sap.m": {},
+        "sap.f": {},
+        "sap.ui.layout": {},
+        "sap.ui.unified": {}
+      }
+    },
+    "models": {
+      "i18n": {
+        "type": "sap.ui.model.resource.ResourceModel",
+        "settings": { "bundleName": "com.support.ticketdist.i18n.i18n", "async": true }
+      }
+    },
+    "resources": {
+      "css": [{ "uri": "css/custom.css" }]
+    },
+    "routing": {
+      "config": {
+        "routerClass": "sap.m.routing.Router",
+        "type": "View",
+        "viewType": "XML",
+        "path": "com.support.ticketdist.view",
+        "controlId": "app",
+        "controlAggregation": "pages",
+        "async": true
+      },
+      "routes": [
+        { "name": "login", "pattern": "", "target": "login" },
+        { "name": "main", "pattern": "main", "target": "main" }
+      ],
+      "targets": {
+        "login": { "id": "login", "name": "Login" },
+        "main": { "id": "main", "name": "Main" }
+      }
+    }
+  }
+}

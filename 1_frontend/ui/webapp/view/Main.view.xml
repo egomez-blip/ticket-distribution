@@ -1,0 +1,186 @@
+<mvc:View
+	controllerName="com.support.ticketdist.controller.Main"
+	xmlns="sap.m"
+	xmlns:mvc="sap.ui.core.mvc"
+	xmlns:core="sap.ui.core"
+	xmlns:u="sap.ui.unified"
+	displayBlock="true"
+	height="100%">
+	<Page id="mainPage" showHeader="true">
+		<customHeader>
+			<Bar>
+				<contentLeft>
+					<Title text="🎫 {i18n>appTitle}"/>
+				</contentLeft>
+				<contentMiddle>
+					<Select id="sessionSelect" items="{v>/sessions}" selectedKey="{v>/currentSessionId}"
+						change=".onSessionChange" tooltip="Sesión de distribución activa" width="260px">
+						<core:Item key="{v>id}" text="{v>name}"/>
+					</Select>
+					<Button icon="sap-icon://add" tooltip="Nueva sesión" press=".onNewSession"/>
+				</contentMiddle>
+				<contentRight>
+					<ObjectStatus text="{app>/user/username}" icon="sap-icon://person-placeholder"/>
+					<Button icon="sap-icon://log" tooltip="{i18n>logout}" press=".onLogout"/>
+				</contentRight>
+			</Bar>
+		</customHeader>
+
+		<IconTabBar id="itb" expandable="false" selectedKey="dist" class="sapUiResponsiveContentPadding">
+			<items>
+
+				<!-- ═══ DISTRIBUCIÓN ═══ -->
+				<IconTabFilter key="dist" text="{i18n>tab_dist}" icon="sap-icon://bar-chart">
+					<Panel headerText="Cargar Excel de tickets" class="sapUiResponsiveMargin" width="auto">
+						<HBox alignItems="Center" class="sapUiSmallMargin">
+							<u:FileUploader id="fileUploader" fileType="xlsx,xls"
+								placeholder="Selecciona el Excel filtrado…" buttonText="Examinar"
+								width="440px" change=".onFileChange"/>
+						</HBox>
+					</Panel>
+
+					<HBox wrap="Wrap" class="sapUiSmallMarginBegin sapUiSmallMarginTop">
+						<Panel class="sapUiTinyMargin"><VBox><ObjectNumber number="{v>/stats/total}" emphasized="true"/><Text text="Total sesión"/></VBox></Panel>
+						<Panel class="sapUiTinyMargin"><VBox><ObjectNumber number="{v>/stats/assigned}" state="Success"/><Text text="Asignados"/></VBox></Panel>
+						<Panel class="sapUiTinyMargin"><VBox><ObjectNumber number="{v>/stats/unassigned}" state="Error"/><Text text="Sin asignar"/></VBox></Panel>
+						<Panel class="sapUiTinyMargin"><VBox><ObjectNumber number="{v>/stats/lastNew}"/><Text text="Nuevos (última carga)"/></VBox></Panel>
+					</HBox>
+
+					<Panel headerText="Asignaciones" class="sapUiResponsiveMargin" width="auto">
+						<Toolbar>
+							<Select id="batchFilter" selectedKey="{v>/batchFilter}" change=".onBatchFilterChange" items="{v>/batchItems}">
+								<core:Item key="{v>key}" text="{v>text}"/>
+							</Select>
+							<ToolbarSpacer/>
+							<Button text="Todas" press=".onFilterAll"/>
+							<Button text="⚠ Sin asignar" press=".onFilterUnassigned"/>
+							<Button text="📧 Generar Email" type="Emphasized" press=".onGoEmail"/>
+						</Toolbar>
+						<Table id="assignTable" items="{v>/tableRows}" alternateRowColors="true">
+							<columns>
+								<Column><Text text="Ticket ID"/></Column>
+								<Column><Text text="Tipo"/></Column>
+								<Column><Text text="Prioridad"/></Column>
+								<Column><Text text="Cliente"/></Column>
+								<Column><Text text="Asunto"/></Column>
+								<Column><Text text="System Role"/></Column>
+								<Column><Text text="Service Area"/></Column>
+								<Column><Text text="Asignado a"/></Column>
+								<Column hAlign="Center"><Text text="Confianza"/></Column>
+								<Column hAlign="Center"><Text text=""/></Column>
+							</columns>
+							<items>
+								<ColumnListItem>
+									<cells>
+										<VBox><Text text="{v>ticketId}"/><Text text="Carga #{v>batchNum}" class="sapUiTinyText"/></VBox>
+										<Text text="{v>ticketType}"/>
+										<ObjectStatus text="{v>priority}" state="{path:'v>priority', formatter:'.formatter.priorityState'}"/>
+										<Text text="{v>customerName}"/>
+										<Text text="{v>subject}" maxLines="2"/>
+										<Text text="{v>systemRole}"/>
+										<Text text="{v>serviceArea}"/>
+										<VBox>
+											<ObjectStatus text="{v>assigneeName}"
+												state="{path:'v>isAssigned', formatter:'.formatter.assigneeState'}"
+												icon="{= ${v>overloaded} ? 'sap-icon://alert' : '' }"/>
+											<Text text="{v>altText}" visible="{= ${v>altText} !== '' }" class="sapUiTinyText"/>
+										</VBox>
+										<ObjectNumber number="{path:'v>score', formatter:'.formatter.scorePct'}" unit="%" visible="{v>isAssigned}"/>
+										<Button icon="sap-icon://edit" tooltip="Reasignar" press=".onReassign"/>
+									</cells>
+								</ColumnListItem>
+							</items>
+						</Table>
+					</Panel>
+				</IconTabFilter>
+
+				<!-- ═══ EQUIPO ═══ -->
+				<IconTabFilter key="team" text="{i18n>tab_team}" icon="sap-icon://group">
+					<Panel headerText="Añadir colega" class="sapUiResponsiveMargin" width="auto">
+						<HBox wrap="Wrap" alignItems="End" class="sapUiSmallMargin">
+							<VBox class="sapUiTinyMarginEnd"><Label text="Nombre"/><Input value="{v>/newMember/name}" placeholder="Ana García" width="180px"/></VBox>
+							<VBox class="sapUiTinyMarginEnd"><Label text="Email"/><Input value="{v>/newMember/email}" placeholder="ana@empresa.com" width="220px"/></VBox>
+							<VBox class="sapUiTinyMarginEnd"><Label text="Capacidad base %"/><Input value="{v>/newMember/cap}" type="Number" width="90px"/></VBox>
+							<Button text="+ Añadir" type="Emphasized" press=".onAddMember"/>
+						</HBox>
+					</Panel>
+					<Panel class="sapUiResponsiveMargin" width="auto">
+						<headerToolbar>
+							<Toolbar><Title text="Equipo — configuración del día"/><ToolbarSpacer/>
+								<Button text="↺ Reset capacidades" press=".onResetCapacities"/></Toolbar>
+						</headerToolbar>
+						<List items="{v>/team}" noDataText="Añade colegas para comenzar">
+							<CustomListItem>
+								<HBox alignItems="Center" justifyContent="SpaceBetween" class="sapUiSmallMargin" wrap="Wrap">
+									<VBox width="260px">
+										<Text text="{v>name}"/>
+										<Text text="{= (${v>email} || 'Sin email') + ' · ' + ${v>assigned_today} + ' tickets hoy' }" class="sapUiTinyText"/>
+									</VBox>
+									<HBox alignItems="Center">
+										<VBox alignItems="Center" class="sapUiMediumMarginEnd">
+											<Label text="Trabaja hoy" class="sapUiTinyText"/>
+											<Switch state="{v>active}" change=".onToggleActive"/>
+										</VBox>
+										<VBox alignItems="Center" width="200px">
+											<Label text="{= 'Capacidad ' + ${v>daily_cap} + '%' }" class="sapUiTinyText"/>
+											<Slider value="{v>daily_cap}" min="0" max="100" step="5" width="170px" change=".onCapChange"/>
+										</VBox>
+										<Button icon="sap-icon://delete" type="Reject" tooltip="Eliminar" press=".onRemoveMember" class="sapUiSmallMarginBegin"/>
+									</HBox>
+								</HBox>
+							</CustomListItem>
+						</List>
+					</Panel>
+				</IconTabFilter>
+
+				<!-- ═══ SKILLS ═══ -->
+				<IconTabFilter key="skills" text="{i18n>tab_skills}" icon="sap-icon://competitor">
+					<Panel headerText="Matriz de habilidades (0–5)" class="sapUiResponsiveMargin" width="auto">
+						<VBox class="sapUiSmallMargin">
+							<Text text="Valora 0–5 el conocimiento de cada colega. Las categorías se extraen de los tickets cargados." class="sapUiSmallMarginBottom"/>
+							<SegmentedButton selectedKey="{v>/activeDim}" selectionChange=".onDimSelect" class="sapUiSmallMarginBottom">
+								<items>
+									<SegmentedButtonItem key="ticketType" text="Tipo de Ticket"/>
+									<SegmentedButtonItem key="systemRole" text="System Role"/>
+									<SegmentedButtonItem key="serviceArea" text="Service Area"/>
+								</items>
+							</SegmentedButton>
+							<ScrollContainer horizontal="true" width="100%"><VBox id="skillBox"/></ScrollContainer>
+						</VBox>
+					</Panel>
+				</IconTabFilter>
+
+				<!-- ═══ EMAIL ═══ -->
+				<IconTabFilter key="email" text="{i18n>tab_email}" icon="sap-icon://email">
+					<Panel headerText="Configuración del correo" class="sapUiResponsiveMargin" width="auto">
+						<VBox class="sapUiSmallMargin">
+							<HBox wrap="Wrap">
+								<VBox width="48%" class="sapUiTinyMarginEnd"><Label text="Para (To)"/><Input value="{v>/email/to_addr}" placeholder="equipo@empresa.com" change=".onEmailFieldChange"/></VBox>
+								<VBox width="48%"><Label text="CC"/><Input value="{v>/email/cc_addr}" placeholder="manager@empresa.com" change=".onEmailFieldChange"/></VBox>
+							</HBox>
+							<Label text="Asunto" class="sapUiTinyMarginTop"/>
+							<Input value="{v>/email/subject}" change=".onEmailFieldChange"/>
+							<Label text="Cuerpo — variables (entre dobles llaves): fecha · batch_label · asignaciones · total · sin_asignar" class="sapUiTinyMarginTop"/>
+							<TextArea value="{v>/email/template}" rows="9" width="100%" growing="false" change=".onEmailFieldChange"/>
+						</VBox>
+					</Panel>
+					<Panel class="sapUiResponsiveMargin" width="auto">
+						<headerToolbar>
+							<Toolbar>
+								<Title text="Vista previa"/>
+								<Select id="previewBatch" selectedKey="{v>/email/previewBatch}" change=".onPreviewBatchChange" items="{v>/email/previewItems}" class="sapUiSmallMarginBegin">
+									<core:Item key="{v>key}" text="{v>text}"/>
+								</Select>
+								<ToolbarSpacer/>
+								<Button text="📋 Copiar cuerpo" press=".onCopyBody"/>
+								<Button text="📧 Abrir Outlook" type="Emphasized" press=".onOpenOutlook"/>
+							</Toolbar>
+						</headerToolbar>
+						<TextArea value="{v>/email/preview}" rows="18" width="100%" editable="false" growing="false" class="sapUiSmallMargin"/>
+					</Panel>
+				</IconTabFilter>
+
+			</items>
+		</IconTabBar>
+	</Page>
+</mvc:View>
